@@ -15,6 +15,7 @@ class CaptureStats:
     reconnects: int = 0
     read_failures: int = 0
     open_failures: int = 0
+    loops: int = 0
 
 
 class RTSPCapture:
@@ -37,6 +38,12 @@ class RTSPCapture:
         self.open_timeout_sec = max(open_timeout_sec, 0.1)
         self.read_timeout_sec = max(read_timeout_sec, 0.1)
         self.stale_frame_timeout_sec = max(stale_frame_timeout_sec, 0.5)
+        # Treat anything that is not a network stream as a local file so that
+        # end-of-file restarts happen instantly (seek to 0) without waiting for
+        # the stale-frame timeout that is designed for dropped RTSP connections.
+        self._is_file: bool = not url.lower().startswith(
+            ("rtsp://", "rtsps://", "http://", "https://")
+        )
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -110,6 +117,13 @@ class RTSPCapture:
             ok, frame = self._capture.read()
             if not ok or frame is None:
                 self.stats.read_failures += 1
+                if self._is_file:
+                    # End-of-file: seek back to the start with zero delay.
+                    self._capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    self.stats.loops += 1
+                    frame_idx = 0
+                    self._last_frame_ts = time.monotonic()
+                    continue
                 now = time.monotonic()
                 if (now - self._last_frame_ts) >= self.stale_frame_timeout_sec:
                     delay = self._schedule_reconnect(delay)

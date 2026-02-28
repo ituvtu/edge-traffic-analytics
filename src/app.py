@@ -20,6 +20,7 @@ from src.inference.plate_recognizer import PlateRecognizer
 from src.io.rtsp_capture import RTSPCapture
 from src.pipeline.plate_ocr import PlateOCRPipeline, PlateResult
 from src.pipeline.vehicle_tracker import VehicleTracker
+from src.utils.profiler import PipelineProfiler
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +122,15 @@ def run_app(config: AppConfig) -> None:
         char_dict_path=str(config.ocr_char_dict_path),
         regex_patterns=config.ocr_regex_patterns,
     )
-    plate_pipeline = PlateOCRPipeline(plate_detector=plate_detector, ocr_engine=ocr_engine)
+
+    # Profiler created before pipelines so it can be injected into PlateOCRPipeline
+    profiler = PipelineProfiler()
+
+    plate_pipeline = PlateOCRPipeline(
+        plate_detector=plate_detector,
+        ocr_engine=ocr_engine,
+        profiler=profiler,
+    )
 
     _ensure_csv(config.output_csv_path)
 
@@ -170,11 +179,23 @@ def run_app(config: AppConfig) -> None:
 
     # Track which IDs have already been written to CSV to avoid duplicates
     csv_written: set[int] = set()
+    # Track video-loop count to trigger profiler epoch boundaries
+    _last_loops: int = 0
 
     capture.start()
     try:
         while True:
+            profiler.start("frame_read")
             frame = capture.read()
+            profiler.stop("frame_read")
+
+            # Detect video loop: save epoch and reset profiler counters so that
+            # print_report() shows per-pass averages instead of cumulative sums.
+            current_loops = capture.stats.loops
+            if current_loops != _last_loops:
+                profiler.new_epoch()
+                _last_loops = current_loops
+
             if frame is None:
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
@@ -194,18 +215,61 @@ def run_app(config: AppConfig) -> None:
                     config.output_video_path, fourcc, fps=25.0, size=(w, h)
                 )
 
+            # ── Frame downscale for faster vehicle detection ──────────────────
+            profiler.start("frame_resize")
+            max_side = max(h, w)
+            det_scale = min(640.0 / max_side, 1.0)
+            if det_scale < 1.0:
+                det_frame = cv2.resize(
+                    frame,
+                    (int(w * det_scale), int(h * det_scale)),
+                    interpolation=cv2.INTER_LINEAR,
+                )
+            else:
+                det_frame = frame
+            profiler.stop("frame_resize")
+
             # ── Analytics (on the clean/unmodified frame) ───────────────
-            detections = vehicle_detector.detect(frame)
+            profiler.start("car_detect")
+            detections = vehicle_detector.detect(det_frame)
+            # Rescale detection coords back to the original full-resolution frame
+            if det_scale < 1.0:
+                inv = 1.0 / det_scale
+                for d in detections:
+                    d.x1 *= inv; d.y1 *= inv; d.x2 *= inv; d.y2 *= inv
+            profiler.stop("car_detect")
+
+            profiler.start("tracker_update")
             tracks = tracker.update(detections, (h, w))
+            profiler.stop("tracker_update")
+
+            # Evict OCR cache entries for IDs the tracker dropped
+            active_ids = {t.track_id for t in tracks}
+            plate_pipeline.prune(active_ids)
 
             color_results: dict[int, ColorResult] = {}
             plate_results: dict[int, PlateResult] = {}
 
             for track in tracks:
+                x1, y1, x2, y2 = track.bbox
+                car_w, car_h = x2 - x1, y2 - y1
+
                 crop = tracker.crop_from_track(frame, track)
 
-                # Both detectors are cached by track_id internally
+                profiler.start("color_detect")
                 color_result = color_detector.detect(track.track_id, crop)
+                profiler.stop("color_detect")
+
+                # Skip OCR for vehicles too far / too small to have a readable plate.
+                # Trigger only when the car bbox is wide enough (> 400 px) OR its
+                # area exceeds 120 000 px² — whichever happens first for a given lens.
+                if car_w <= 400 and car_w * car_h <= 120_000:
+                    color_results[track.track_id] = color_result
+                    plate_results[track.track_id] = PlateResult(None, 0.0)
+                    continue
+
+                # plate_detect + text_recognize timings are recorded inside
+                # PlateOCRPipeline (injected profiler) for fine-grained split.
                 plate_result = plate_pipeline.get_plate_for_track(track.track_id, crop)
 
                 color_results[track.track_id] = color_result
@@ -228,10 +292,14 @@ def run_app(config: AppConfig) -> None:
             fps_ema = 0.9 * fps_ema + 0.1 * instant_fps
             t_prev = t_now
 
+            profiler.tick()
+
             # ── Visualisation (on a copy) ────────────────────────────────
+            profiler.start("visualization")
             visualized = visualizer.draw_frame(
                 frame, tracks, color_results, plate_results, fps=fps_ema
             )
+            profiler.stop("visualization")
 
             # Full-resolution frame goes to the file writer
             if video_writer is not None:
@@ -251,6 +319,7 @@ def run_app(config: AppConfig) -> None:
         if video_writer is not None:
             video_writer.release()
         cv2.destroyAllWindows()
+        profiler.print_report()
 
 
 # ---------------------------------------------------------------------------
