@@ -28,32 +28,27 @@ class PlateOCRPipeline:
         self.plate_detector = plate_detector
         self.ocr_engine = ocr_engine
         self._profiler = profiler
-        # Public cache: keyed by track_id, holds confirmed plate results.
-        # Use prune() to evict stale IDs after each tracker update.
         self.ocr_cache: dict[int, PlateResult] = {}
-
-    # ------------------------------------------------------------------
-    # Cache management
-    # ------------------------------------------------------------------
+        self.ocr_attempts: dict[int, int] = {}
+        self.ocr_max_attempts: int = 10
 
     def prune(self, active_ids: set[int]) -> None:
-        """Remove cache entries for track IDs that are no longer active."""
         stale = self.ocr_cache.keys() - active_ids
         for tid in stale:
             del self.ocr_cache[tid]
-
-    # ------------------------------------------------------------------
-    # Main pipeline entry
-    # ------------------------------------------------------------------
+            self.ocr_attempts.pop(tid, None)
 
     def get_plate_for_track(self, track_id: int, vehicle_crop: np.ndarray) -> PlateResult:
-        # Fast path: already recognised for this track.
         if track_id in self.ocr_cache:
             return self.ocr_cache[track_id]
+        self.ocr_attempts[track_id] = self.ocr_attempts.get(track_id, 0) + 1
+        if self.ocr_attempts[track_id] > self.ocr_max_attempts:
+            negative = PlateResult(plate=None, confidence=0.0)
+            self.ocr_cache[track_id] = negative
+            return negative
         if vehicle_crop.size == 0:
             return PlateResult(None, 0.0)
 
-        # ── Stage 1: localise the plate inside the vehicle crop ──────────
         if self._profiler:
             self._profiler.start("plate_detect")
         plate_detections = self.plate_detector.detect(vehicle_crop)
@@ -72,10 +67,6 @@ class PlateOCRPipeline:
 
         plate_crop = vehicle_crop[y1:y2, x1:x2]
 
-        # ── Stage 2: read characters from the isolated plate crop ────────
-        # YOLO already isolated the plate — feed it directly to the recognizer.
-        # Running DBNet detection again on an already-cropped tiny image is
-        # unreliable and redundant; skip to recognition + validation.
         if self._profiler:
             self._profiler.start("text_recognize")
         plate_text, ocr_conf = self.ocr_engine.recognize_and_validate(plate_crop)

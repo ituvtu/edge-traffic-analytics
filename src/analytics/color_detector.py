@@ -1,7 +1,8 @@
+from __future__ import annotations
+
 import cv2
 import numpy as np
 from dataclasses import dataclass
-from collections import Counter
 
 
 @dataclass(slots=True)
@@ -11,85 +12,71 @@ class ColorResult:
 
 
 class ColorDetector:
-    """
-    Detects the dominant color of a vehicle using HSV color space thresholding.
-    Optimized for CPU usage, avoiding heavy ML models.
-    """
-
-    def __init__(self):
-        # Define HSV color ranges using dictionaries.
-        # Format: Lower Bound, Upper Bound for Hue, Saturation, Value.
-        # HSV in OpenCV: H [0, 179], S [0, 255], V [0, 255]
-        self.color_ranges = {
+    def __init__(self) -> None:
+        self.color_ranges: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {
             "white": [
-                (np.array([0, 0, 200]), np.array([179, 30, 255]))  # Low saturation, high value
+                (np.array([0, 0, 175]), np.array([180, 25, 255])),
             ],
             "black": [
-                 (np.array([0, 0, 0]), np.array([179, 255, 30])) # Low value regardless of saturation/hue
+                (np.array([0, 0, 0]), np.array([179, 255, 55])),
             ],
-            "gray": [
-                 (np.array([0, 0, 50]), np.array([179, 50, 220])) # Low saturation, medium value
+            "grey": [
+                (np.array([0, 0, 50]), np.array([180, 45, 174])),
             ],
             "red": [
                 (np.array([0, 100, 100]), np.array([10, 255, 255])),
-                (np.array([160, 100, 100]), np.array([179, 255, 255]))
+                (np.array([160, 100, 100]), np.array([179, 255, 255])),
             ],
-            "blue": [
-                (np.array([100, 150, 0]), np.array([140, 255, 255]))
-            ],
-            "green": [
-                (np.array([36, 100, 100]), np.array([86, 255, 255]))
+            "orange": [
+                (np.array([10, 150, 150]), np.array([20, 255, 255])),
             ],
             "yellow": [
-                (np.array([20, 100, 100]), np.array([35, 255, 255]))
-            ]
+                (np.array([20, 100, 100]), np.array([35, 255, 255])),
+            ],
+            "lime": [
+                (np.array([40, 150, 150]), np.array([65, 255, 255])),
+            ],
+            "green": [
+                (np.array([65, 100, 50]), np.array([86, 255, 255])),
+            ],
+            "cyan": [
+                (np.array([85, 100, 100]), np.array([100, 255, 255])),
+            ],
+            "blue": [
+                (np.array([100, 100, 60]), np.array([140, 255, 255])),
+            ],
+            "purple": [
+                (np.array([130, 80, 50]), np.array([155, 255, 255])),
+            ],
+            "brown": [
+                (np.array([8, 100, 40]), np.array([18, 200, 130])),
+            ],
+            "beige": [
+                (np.array([15, 20, 180]), np.array([30, 70, 235])),
+            ],
         }
-        
+
     def detect_color(self, image: np.ndarray) -> str:
-        """
-        Detects the dominant color in the given image.
-        
-        Args:
-            image: BGR image (numpy array)
-            
-        Returns:
-            The name of the dominant color.
-        """
         if image is None or image.size == 0:
             return "unknown"
 
-        # Crop central 50%
-        h, w = image.shape[:2]
-        crop_h, crop_w = int(h * 0.5), int(w * 0.5)
-        start_y, start_x = int(h * 0.25), int(w * 0.25)
-        
-        center_crop = image[start_y:start_y+crop_h, start_x:start_x+crop_w]
-        
-        if center_crop.size == 0:
-             # Fallback if crop failed somehow (e.g. tiny image)
-             center_crop = image
+        h = image.shape[0]
+        image = image[:max(1, int(h * 0.75)), :]
 
-        # Convert to HSV
-        hsv_img = cv2.cvtColor(center_crop, cv2.COLOR_BGR2HSV)
-        
-        max_pixels = 0
-        dominant_color = "unknown"
-        
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+
+        best_count = 0
+        best_color = "unknown"
         for color_name, ranges in self.color_ranges.items():
-            mask_count = 0
-            for (lower, upper) in ranges:
-                mask = cv2.inRange(hsv_img, lower, upper)
-                mask_count += cv2.countNonZero(mask)
-            
-            if mask_count > max_pixels:
-                max_pixels = mask_count
-                dominant_color = color_name
-                
-        return dominant_color
+            count = sum(cv2.countNonZero(cv2.inRange(hsv, lo, hi)) for lo, hi in ranges)
+            if count > best_count:
+                best_count = count
+                best_color = color_name
+
+        return best_color
 
 
 class VehicleColorDetector:
-    """Wrapper for ColorDetector to integrate with application tracks."""
     def __init__(self) -> None:
         self._detector = ColorDetector()
         self._cache: dict[int, ColorResult] = {}
@@ -97,11 +84,13 @@ class VehicleColorDetector:
     def detect(self, track_id: int, crop: np.ndarray) -> ColorResult:
         if track_id in self._cache:
             return self._cache[track_id]
-        
         color_name = self._detector.detect_color(crop)
-        # Simple confidence metric could be added, but passing 1.0/0.0 for now basic implementation
-        confidence = 0.0 if color_name == "unknown" else 1.0 
-        
-        result = ColorResult(color_name=color_name, confidence=confidence)
+        result = ColorResult(
+            color_name=color_name,
+            confidence=0.0 if color_name == "unknown" else 1.0,
+        )
         self._cache[track_id] = result
         return result
+
+    def reset_cache(self) -> None:
+        self._cache.clear()

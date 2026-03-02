@@ -1,8 +1,4 @@
 import numpy as np
-from collections import deque
-import os
-import os.path as osp
-import copy
 
 from .kalman_filter import KalmanFilter
 from . import matching
@@ -22,10 +18,13 @@ class STrack(BaseTrack):
         self.tracklet_len = 0
 
     def predict(self):
+        if self.mean is None:
+            return
         mean_state = self.mean.copy()
         if self.state != TrackState.Tracked:
             mean_state[7] = 0
-        self.mean, self.covariance = self.kalman_filter.predict(mean_state, self.covariance)
+        if self.kalman_filter is not None:
+            self.mean, self.covariance = self.kalman_filter.predict(mean_state, self.covariance)
 
     @staticmethod
     def multi_predict(stracks):
@@ -55,9 +54,10 @@ class STrack(BaseTrack):
         self.start_frame = frame_id
 
     def re_activate(self, new_track, frame_id, new_id=False):
-        self.mean, self.covariance = self.kalman_filter.update(
-            self.mean, self.covariance, self.tlwh_to_xyah(new_track.tlwh)
-        )
+        if self.kalman_filter is not None:
+            self.mean, self.covariance = self.kalman_filter.update(
+                self.mean, self.covariance, self.tlwh_to_xyah(new_track.tlwh)
+            )
         self.tracklet_len = 0
         self.state = TrackState.Tracked
         self.is_activated = True
@@ -78,8 +78,9 @@ class STrack(BaseTrack):
         self.tracklet_len += 1
 
         new_tlwh = new_track.tlwh
-        self.mean, self.covariance = self.kalman_filter.update(
-            self.mean, self.covariance, self.tlwh_to_xyah(new_tlwh))
+        if self.kalman_filter is not None:
+            self.mean, self.covariance = self.kalman_filter.update(
+                self.mean, self.covariance, self.tlwh_to_xyah(new_tlwh))
         self.state = TrackState.Tracked
         self.is_activated = True
 
@@ -322,6 +323,6 @@ def remove_duplicate_stracks(stracksa, stracksb):
             dupb.append(q)
         else:
             dupa.append(p)
-    resa = [t for i, t in enumerate(stracksa) if not i in dupa]
-    resb = [t for i, t in enumerate(stracksb) if not i in dupb]
+    resa = [t for i, t in enumerate(stracksa) if i not in dupa]
+    resb = [t for i, t in enumerate(stracksb) if i not in dupb]
     return resa, resb

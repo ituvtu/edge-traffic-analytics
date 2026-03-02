@@ -1,5 +1,6 @@
 numpy==1.26.4
 opencv-python==4.10.0.84
 onnxruntime==1.20.0
-scipy
-lapx
+scipy==1.15.3
+lapx==0.9.4
+python-dotenv==1.2.1

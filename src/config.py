@@ -22,9 +22,11 @@ class ModelPathsConfig:
 
 @dataclass(slots=True)
 class ThresholdsConfig:
-    vehicle_conf_threshold: float = float(os.getenv("VEHICLE_CONF_THRESHOLD", "0.35"))
+    vehicle_conf_threshold: float = float(os.getenv("VEHICLE_CONF_THRESHOLD", "0.20"))
     plate_conf_threshold: float = float(os.getenv("PLATE_CONF_THRESHOLD", "0.30"))
     nms_threshold: float = float(os.getenv("NMS_THRESHOLD", "0.45"))
+    ocr_min_vehicle_width: int = int(os.getenv("OCR_MIN_VEHICLE_WIDTH", "400"))
+    ocr_min_vehicle_area: int = int(os.getenv("OCR_MIN_VEHICLE_AREA", "120000"))
 
 
 def _default_ocr_regex_patterns() -> list[str]:
@@ -63,6 +65,17 @@ def _default_rtsp_sources() -> dict[str, str]:
     return {"main": os.getenv("RTSP_URL", "")}
 
 
+def _next_artifact_path(base: str, ext: str) -> Path:
+    folder = Path("artifacts")
+    folder.mkdir(exist_ok=True)
+    existing = sorted(folder.glob(f"{base}_*.{ext}"))
+    if not existing:
+        return folder / f"{base}_1.{ext}"
+    nums = [int(p.stem.split('_')[-1]) for p in existing if p.stem.split('_')[-1].isdigit()]
+    next_num = max(nums, default=0) + 1
+    return folder / f"{base}_{next_num}.{ext}"
+
+
 @dataclass(slots=True)
 class AppConfig:
     rtsp_sources: dict[str, str] = field(default_factory=_default_rtsp_sources)
@@ -71,15 +84,34 @@ class AppConfig:
     thresholds: ThresholdsConfig = field(default_factory=ThresholdsConfig)
     ocr_regex: OCRRegexConfig = field(default_factory=OCRRegexConfig)
     output_csv_path: Path = Path(os.getenv("OUTPUT_CSV_PATH", "artifacts/results.csv"))
+    report_csv_path: Path = Path(os.getenv("REPORT_CSV_PATH", "artifacts/report.csv"))
+    profiler_report_path: Path = Path("artifacts/profiler.txt")
+    save_video: bool = os.getenv("SAVE_VIDEO", "false").lower() in ("1", "true", "yes")
     output_video_path: Path | None = (
         Path(os.environ["OUTPUT_VIDEO_PATH"]) if "OUTPUT_VIDEO_PATH" in os.environ else None
     )
+    headless_mode: bool = os.getenv("HEADLESS_MODE", "false").lower() in ("1", "true", "yes")
     frame_skip: int = int(os.getenv("FRAME_SKIP", "1"))
     reconnect_initial_delay_sec: float = float(os.getenv("RECONNECT_INITIAL_DELAY_SEC", "1.0"))
     reconnect_max_delay_sec: float = float(os.getenv("RECONNECT_MAX_DELAY_SEC", "8.0"))
+    reset_stats_on_loop: bool = os.getenv("RESET_STATS_ON_LOOP", "true").lower() in ("1", "true", "yes")
     vehicle_class_ids: tuple[int, ...] = (2, 3, 5, 7)
     input_size: tuple[int, int] = (640, 640)
     profile: str = os.getenv("PROFILE", "cpu")
+
+    def __post_init__(self) -> None:
+        if self.save_video and self.output_video_path is None:
+            self.output_video_path = _next_artifact_path("output", "mp4")
+        if "REPORT_CSV_PATH" not in os.environ:
+            self.report_csv_path = _next_artifact_path("report", "csv")
+        # Derive profiler report path from report_csv_path session number.
+        # e.g. artifacts/report_3.csv  →  artifacts/profiler_3.txt
+        stem = self.report_csv_path.stem          # "report_3"
+        suffix = stem.split("_")[-1]              # "3"
+        if suffix.isdigit():
+            self.profiler_report_path = self.report_csv_path.parent / f"profiler_{suffix}.txt"
+        else:
+            self.profiler_report_path = self.report_csv_path.parent / "profiler.txt"
 
     @property
     def rtsp_url(self) -> str:
@@ -156,6 +188,14 @@ class AppConfig:
     @ocr_regex_patterns.setter
     def ocr_regex_patterns(self, value: list[str]) -> None:
         self.ocr_regex.patterns = value
+
+    @property
+    def ocr_min_vehicle_width(self) -> int:
+        return self.thresholds.ocr_min_vehicle_width
+
+    @property
+    def ocr_min_vehicle_area(self) -> int:
+        return self.thresholds.ocr_min_vehicle_area
 
     @property
     def runtime_profiles(self) -> dict[str, RuntimeProfile]:

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
 
 import cv2
 import numpy as np
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -29,6 +33,7 @@ class RTSPCapture:
         open_timeout_sec: float = 5.0,
         read_timeout_sec: float = 5.0,
         stale_frame_timeout_sec: float = 6.0,
+        loop_file: bool = True,
     ) -> None:
         self.url = url
         self.frame_skip = max(frame_skip, 1)
@@ -41,9 +46,7 @@ class RTSPCapture:
         # Treat anything that is not a network stream as a local file so that
         # end-of-file restarts happen instantly (seek to 0) without waiting for
         # the stale-frame timeout that is designed for dropped RTSP connections.
-        self._is_file: bool = not url.lower().startswith(
-            ("rtsp://", "rtsps://", "http://", "https://")
-        )
+        self._is_file: bool = not url.lower().startswith(("rtsp://", "rtsps://", "http://", "https://"))
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -51,6 +54,18 @@ class RTSPCapture:
         self._last_frame_ts: float = 0.0
         self._capture: cv2.VideoCapture | None = None
         self.stats = CaptureStats()
+        self.source_fps: float = 0.0
+        self._latest_frame_pos_ms: float = 0.0
+        self._loop_file = loop_file
+        self._eof_reached = False
+
+    @property
+    def is_live_stream(self) -> bool:
+        return not self._is_file
+
+    @property
+    def eof_reached(self) -> bool:
+        return self._eof_reached
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -71,12 +86,30 @@ class RTSPCapture:
                 return None
             return self._latest_frame.copy()
 
+    @property
+    def frame_pos_ms(self) -> float:
+        with self._lock:
+            return self._latest_frame_pos_ms
+
     def _open_capture(self) -> cv2.VideoCapture:
         params: list[int] = []
         if hasattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC"):
             params.extend([cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, int(self.open_timeout_sec * 1000)])
         if hasattr(cv2, "CAP_PROP_READ_TIMEOUT_MSEC"):
             params.extend([cv2.CAP_PROP_READ_TIMEOUT_MSEC, int(self.read_timeout_sec * 1000)])
+
+        # Force FFMPEG-level timeout and TCP transport for RTSP streams.
+        # - rtsp_transport;tcp avoids UDP packet loss / grey-frame artefacts.
+        # - timeout;5000000 (µs) ensures a hard 5-second connection deadline so
+        #   that a dead camera unblocks the reader thread and lets Exponential
+        #   Backoff take over rather than hanging for 30-60 s.
+        # These env-var options work across all OpenCV / FFMPEG versions and act
+        # as a reliable fallback alongside the newer CAP_PROP_*_TIMEOUT_MSEC API.
+        if not self._is_file:
+            timeout_us = int(self.open_timeout_sec * 1_000_000)
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+                f"rtsp_transport;tcp|timeout;{timeout_us}"
+            )
 
         if params:
             cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG, params)
@@ -113,12 +146,21 @@ class RTSPCapture:
                     continue
                 delay = self.reconnect_initial_delay_sec
                 self._last_frame_ts = time.monotonic()
+                if self.source_fps == 0.0:
+                    reported = self._capture.get(cv2.CAP_PROP_FPS)
+                    if reported and reported > 0:
+                        self.source_fps = reported
 
             ok, frame = self._capture.read()
             if not ok or frame is None:
                 self.stats.read_failures += 1
                 if self._is_file:
-                    # End-of-file: seek back to the start with zero delay.
+                    if not self._loop_file:
+                        with self._lock:
+                            self._latest_frame = None
+                        self._eof_reached = True
+                        self._stop_event.set()
+                        break
                     self._capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     self.stats.loops += 1
                     frame_idx = 0
@@ -140,6 +182,7 @@ class RTSPCapture:
 
             with self._lock:
                 self._latest_frame = frame
+                self._latest_frame_pos_ms = self._capture.get(cv2.CAP_PROP_POS_MSEC)
             self.stats.frames_received += 1
 
             if self.loop_sleep_sec > 0:
@@ -185,12 +228,10 @@ def _run_local_test() -> None:
             now = time.monotonic()
             if now - last_stats_print_ts >= 2.0:
                 stats = capture.stats
-                print(
-                    "frames_received=", stats.frames_received,
-                    "reconnects=", stats.reconnects,
-                    "open_failures=", stats.open_failures,
-                    "read_failures=", stats.read_failures,
-                    sep="",
+                _log.info(
+                    "frames_received=%d reconnects=%d open_failures=%d read_failures=%d",
+                    stats.frames_received, stats.reconnects,
+                    stats.open_failures, stats.read_failures,
                 )
                 last_stats_print_ts = now
 

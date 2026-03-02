@@ -7,6 +7,12 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
+def _create_session_options() -> ort.SessionOptions:
+    options = ort.SessionOptions()
+    options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    options.intra_op_num_threads = 4
+    options.inter_op_num_threads = 4
+    return options
 
 @dataclass(slots=True)
 class Detection:
@@ -16,7 +22,6 @@ class Detection:
     y2: float
     score: float
     class_id: int
-
 
 class YOLOv10ONNX:
     def __init__(
@@ -31,30 +36,19 @@ class YOLOv10ONNX:
         self.conf_threshold = conf_threshold
         self.input_size = input_size
         self.allowed_class_ids = allowed_class_ids
-        
-        # Enforce CPU execution for edge compatibility
         self.session = ort.InferenceSession(
-            self.model_path, 
-            providers=["CPUExecutionProvider"]
+            self.model_path,
+            sess_options=_create_session_options(),
+            providers=["CPUExecutionProvider"],
         )
         self.input_name = self.session.get_inputs()[0].name
 
     def preprocess(self, frame: np.ndarray) -> tuple[np.ndarray, float, float]:
-        """
-        Optimized CPU preprocessing.
-        """
         h, w = frame.shape[:2]
         input_w, input_h = self.input_size
-        
-        # Fast resizing
         resized = cv2.resize(frame, (input_w, input_h), interpolation=cv2.INTER_LINEAR)
-        
-        # Vectorized normalization and transposition (HWC -> CHW)
-        # Replacing slow loop-based operations with direct numpy manipulation
         img = resized.astype(np.float32)
         img /= 255.0
-        
-        # Add batch dimension: (1, 3, 640, 640)
         img = np.transpose(img, (2, 0, 1))
         img = np.expand_dims(img, axis=0)
 
@@ -73,46 +67,29 @@ class YOLOv10ONNX:
         scale_x: float,
         scale_y: float,
     ) -> np.ndarray:
-        """
-        Post-processing adapted for YOLOv10 (NMS-free) output.
-        Format varies by export, typically (1, 300, 6) or (1, 6, 300).
-        Goal: Return Nx6 matrix [x1, y1, x2, y2, conf, class_id]
-        """
-        # Remove batch dim: (1, 300, 6) -> (300, 6)
         pred = np.squeeze(raw_output)
 
-        # Handle different output shapes if necessary (transpose if 6xN)
         if pred.shape[0] == 6 and pred.shape[1] > 6:
             pred = pred.T
 
-        # If empty or wrong shape
         if pred.ndim < 2 or pred.shape[1] < 6:
-             return np.empty((0, 6), dtype=np.float32)
+            return np.empty((0, 6), dtype=np.float32)
 
-        # Filtering mask (vectorized is faster than loop)
-        # Columns: 0=x1, 1=y1, 2=x2, 3=y2, 4=conf, 5=class
-        
-        # 1. Confidence threshold
         mask = pred[:, 4] >= self.conf_threshold
         pred = pred[mask]
 
-        # 2. Class filtering
         if self.allowed_class_ids is not None:
-             # Check if class_id (col 5) is in allowed list
-             class_mask = np.isin(pred[:, 5], self.allowed_class_ids)
-             pred = pred[class_mask]
+            class_mask = np.isin(pred[:, 5], self.allowed_class_ids)
+            pred = pred[class_mask]
 
         if len(pred) == 0:
             return np.empty((0, 6), dtype=np.float32)
 
-        # 3. Rescaling coordinates
-        # Using in-place multiplication for speed
-        pred[:, 0] *= scale_x  # x1
-        pred[:, 1] *= scale_y  # y1
-        pred[:, 2] *= scale_x  # x2
-        pred[:, 3] *= scale_y  # y2
+        pred[:, 0] *= scale_x
+        pred[:, 1] *= scale_y
+        pred[:, 2] *= scale_x
+        pred[:, 3] *= scale_y
 
-        # 4. Clipping to image boundaries
         h, w = original_shape[:2]
         np.clip(pred[:, 0], 0, w, out=pred[:, 0])
         np.clip(pred[:, 2], 0, w, out=pred[:, 2])
@@ -126,7 +103,6 @@ class YOLOv10ONNX:
         raw_output = self.run(input_tensor)
         return self.postprocess(raw_output, frame.shape[:2], scale_x, scale_y)
 
-
 class ONNXYoloDetector:
     def __init__(
         self,
@@ -137,7 +113,6 @@ class ONNXYoloDetector:
         input_size: tuple[int, int] = (640, 640),
         allowed_class_ids: tuple[int, ...] | None = None,
     ) -> None:
-        # Compatibility wrapper: providers arg is ignored, enforced CPU
         self._detector = YOLOv10ONNX(
             model_path=model_path,
             conf_threshold=conf_threshold,
@@ -150,7 +125,6 @@ class ONNXYoloDetector:
 
     def detect(self, frame: np.ndarray) -> list[Detection]:
         matrix = self.detect_matrix(frame)
-        # Convert matrix to list of Detection objects
         return [
             Detection(
                 x1=row[0], y1=row[1], x2=row[2], y2=row[3],

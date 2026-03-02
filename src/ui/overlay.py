@@ -7,6 +7,12 @@ from src.analytics.color_detector import ColorResult
 from src.pipeline.plate_ocr import PlateResult
 from src.pipeline.vehicle_tracker import Track
 
+_BOX_THICKNESS: int = 2
+_LABEL_FONT = cv2.FONT_HERSHEY_SIMPLEX
+_LABEL_FONT_SCALE: float = 0.5
+_LABEL_THICKNESS: int = 2
+_LABEL_OFFSET_Y: int = 8
+
 
 def _color_to_bgr(color_name: str) -> tuple[int, int, int]:
     palette = {
@@ -37,8 +43,9 @@ def draw_overlay(
         plate = plate_results.get(track.track_id, PlateResult(None, 0.0))
 
         box_color = _color_to_bgr(color.color_name)
-        cv2.rectangle(output, (x1, y1), (x2, y2), box_color, 2)
+        cv2.rectangle(output, (x1, y1), (x2, y2), box_color, _BOX_THICKNESS)
 
         label = f"ID:{track.track_id} plate:{plate.plate or '-'} color:{color.color_name}"
-        cv2.putText(output, label, (x1, max(0, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
+        cv2.putText(output, label, (x1, max(0, y1 - _LABEL_OFFSET_Y)),
+                    _LABEL_FONT, _LABEL_FONT_SCALE, box_color, _LABEL_THICKNESS)
     return output

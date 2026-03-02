@@ -1,0 +1,39 @@
+# Version control
+.git/
+.gitignore
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# PyTorch weights (ONNX models are kept)
+pt/
+
+# Artifacts
+artifacts/
+assets/
+# Cache & temp
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Dev/local tooling (not needed in container)
+tools/
+requirements-tools.txt
+pyproject.toml
+README.MD
+
+# IDE
+.idea/
+.vscode/
+
+# Temp files
+temp_*/
+tmp_*/

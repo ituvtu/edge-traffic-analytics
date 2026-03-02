@@ -1,17 +1,45 @@
-.venv/
+# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Cache
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
 
-artifacts/
-logs/
+# PyTorch weights (ONNX models are tracked)
+pt/
 
-# Generated media/cache artifacts
-*.mp4
-*.avi
-*.log
-.vscode/
+# Artifacts & output
+artifacts/*
+!artifacts/.gitkeep
+
+# Temp files
+temp_*/
+tmp_*/
+
+# Distribution
+*.whl
+*.tar.gz

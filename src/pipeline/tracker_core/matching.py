@@ -1,30 +1,24 @@
-import cv2
 import numpy as np
 import scipy
 import lap
 from scipy.spatial.distance import cdist
 from . import kalman_filter
-import time
 
 def bbox_overlaps(boxes1, boxes2):
-    """
-    Compute IOU between two sets of boxes in the form [x1,y1,x2,y2].
-    Replaces cython_bbox dependence with pure numpy.
-    """
     if boxes1.shape[0] == 0 or boxes2.shape[0] == 0:
         return np.zeros((boxes1.shape[0], boxes2.shape[0]))
 
     boxes1 = boxes1.astype(float)
     boxes2 = boxes2.astype(float)
-    
+
     area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
     area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
 
-    lt = np.maximum(boxes1[:, None, :2], boxes2[:, :2])  # [N,M,2]
-    rb = np.minimum(boxes1[:, None, 2:], boxes2[:, 2:])  # [N,M,2]
+    lt = np.maximum(boxes1[:, None, :2], boxes2[:, :2])
+    rb = np.minimum(boxes1[:, None, 2:], boxes2[:, 2:])
 
-    wh = (rb - lt).clip(min=0)  # [N,M,2]
-    inter = wh[:, :, 0] * wh[:, :, 1]  # [N,M]
+    wh = (rb - lt).clip(min=0)
+    inter = wh[:, :, 0] * wh[:, :, 1]
 
     union = area1[:, None] + area2 - inter
     return inter / union
@@ -33,20 +27,19 @@ bbox_ious = bbox_overlaps
 
 
 def merge_matches(m1, m2, shape):
-    O,P,Q = shape
+    rows, cols_a, cols_b = shape
     m1 = np.asarray(m1)
     m2 = np.asarray(m2)
 
-    M1 = scipy.sparse.coo_matrix((np.ones(len(m1)), (m1[:, 0], m1[:, 1])), shape=(O, P))
-    M2 = scipy.sparse.coo_matrix((np.ones(len(m2)), (m2[:, 0], m2[:, 1])), shape=(P, Q))
+    M1 = scipy.sparse.coo_matrix((np.ones(len(m1)), (m1[:, 0], m1[:, 1])), shape=(rows, cols_a))
+    M2 = scipy.sparse.coo_matrix((np.ones(len(m2)), (m2[:, 0], m2[:, 1])), shape=(cols_a, cols_b))
 
-    mask = M1*M2
+    mask = M1 * M2
     match = mask.nonzero()
-    match = list(zip(match[0], match[1]))
-    unmatched_O = tuple(set(range(O)) - set([i for i, j in match]))
-    unmatched_Q = tuple(set(range(Q)) - set([j for i, j in match]))
-
-    return match, unmatched_O, unmatched_Q
+    match_pairs = list(zip(match[0], match[1]))
+    unmatched_rows = tuple(set(range(rows)) - {i for i, j in match_pairs})
+    unmatched_cols_b = tuple(set(range(cols_b)) - {j for i, j in match_pairs})
+    return match_pairs, unmatched_rows, unmatched_cols_b
 
 
 def _indices_to_matches(cost_matrix, indices, thresh):
@@ -64,7 +57,14 @@ def linear_assignment(cost_matrix, thresh):
     if cost_matrix.size == 0:
         return np.empty((0, 2), dtype=int), tuple(range(cost_matrix.shape[0])), tuple(range(cost_matrix.shape[1]))
     matches, unmatched_a, unmatched_b = [], [], []
-    cost, x, y = lap.lapjv(cost_matrix, extend_cost=True, cost_limit=thresh)
+    result = lap.lapjv(cost_matrix, extend_cost=True, cost_limit=thresh)
+    if len(result) == 3:
+        cost, x, y = result
+    elif len(result) == 2:
+        x, y = result
+        cost = None
+    else:
+        raise ValueError("lapjv returned unexpected number of values")
     for ix, mx in enumerate(x):
         if mx >= 0:
             matches.append([ix, mx])
@@ -103,7 +103,9 @@ def iou_distance(atracks, btracks):
     :rtype cost_matrix np.ndarray
     """
 
-    if (len(atracks)>0 and isinstance(atracks[0], np.ndarray)) or (len(btracks) > 0 and isinstance(btracks[0], np.ndarray)):
+    if (len(atracks) > 0 and isinstance(atracks[0], np.ndarray)) or (
+        len(btracks) > 0 and isinstance(btracks[0], np.ndarray)
+    ):
         atlbrs = atracks
         btlbrs = btracks
     else:
@@ -123,7 +125,9 @@ def v_iou_distance(atracks, btracks):
     :rtype cost_matrix np.ndarray
     """
 
-    if (len(atracks)>0 and isinstance(atracks[0], np.ndarray)) or (len(btracks) > 0 and isinstance(btracks[0], np.ndarray)):
+    if (len(atracks) > 0 and isinstance(atracks[0], np.ndarray)) or (
+        len(btracks) > 0 and isinstance(btracks[0], np.ndarray)
+    ):
         atlbrs = atracks
         btlbrs = btracks
     else:
@@ -146,10 +150,8 @@ def embedding_distance(tracks, detections, metric='cosine'):
     if cost_matrix.size == 0:
         return cost_matrix
     det_features = np.asarray([track.curr_feat for track in detections], dtype=float)
-    #for i, track in enumerate(tracks):
-        #cost_matrix[i, :] = np.maximum(0.0, cdist(track.smooth_feat.reshape(1,-1), det_features, metric))
     track_features = np.asarray([track.smooth_feat for track in tracks], dtype=float)
-    cost_matrix = np.maximum(0.0, cdist(track_features, det_features, metric))  # Nomalized features
+    cost_matrix = np.maximum(0.0, cdist(track_features, det_features, metric))  # type: ignore
     return cost_matrix
 
 
