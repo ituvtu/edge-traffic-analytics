@@ -6,15 +6,38 @@
 - The application processes video-streams and exports analytical-data into a structured CSV-format alongside a rendered MP4 video-file.
 - The architecture is optimized for edge-devices and headless-execution.
 
-**Execution modes:**
+## Execution Modes
+
 - Executing this pipeline via Docker runs strictly in headless-mode without a live graphical user-interface (GUI), because Docker containers lack native display-servers by default.
 - The Docker-execution will silently process the stream and output the final artifacts (`output.mp4` and `report.csv`) to the `artifacts` directory.
 - If you want to see the real-time visual tracking-interface, you must execute the pipeline locally using the Python-environment method, since local execution has direct access to the host window-manager.
 
 ---
 
+## Technical Requirements
+
+- ✅ **Continuous traffic analysis:** The pipeline continuously processes video streams to analyze vehicle traffic. This is achieved by leveraging a multi-threaded architecture where frames are ingested in real-time from RTSP streams or local video files. The pipeline ensures that no frame is skipped unless explicitly configured, enabling a continuous flow of traffic data for analysis.
+
+- ✅ **Detection of new vehicles:** Identifies new vehicles entering the frame using the YOLOv10-nano model optimized for edge devices. The model detects vehicles in each frame, and the ByteTrack algorithm assigns unique IDs to new detections, ensuring that each vehicle is tracked individually.
+
+- ✅ **Unique ID assignment:** Assigns a persistent unique ID to each detected vehicle using the ByteTrack algorithm. This algorithm uses a two-stage association strategy to minimize ID switches, even in cases of partial occlusion or missed detections. The Kalman filter further predicts the position of vehicles between frames, ensuring robust tracking.
+
+- ✅ **License plate recognition:** Detects and reads license plates on vehicles using a two-stage approach. First, the YOLOv10-nano model localizes the license plate within the vehicle's bounding box. Then, PaddleOCR processes the localized region to extract text. The system includes caching and validation mechanisms to ensure accurate and efficient OCR results.
+
+- ✅ **Vehicle color detection:** Identifies the color of each vehicle by analyzing the upper portion of the vehicle's bounding box in HSV color space. This approach is computationally efficient and robust to lighting variations, ensuring accurate color classification in real-time.
+
+- ✅ **Real-time and edge optimization:** Optimized for real-time performance and edge devices using ONNX Runtime and lightweight models. The pipeline employs techniques such as frame downscaling, skipping frames based on hardware capabilities, and asynchronous processing to achieve high performance on modest hardware.
+
+- ✅ **RTSP stream input:** Accepts an RTSP stream path as input and displays the video with overlays. The pipeline includes robust reconnection logic to handle transient network issues, ensuring uninterrupted processing of live streams.
+
+- ✅ **Overlay visualization:** Draws bounding boxes in the detected vehicle's color and displays the license plate text directly on the video frames. This visualization provides immediate feedback on the pipeline's performance and enhances interpretability.
+
+- ✅ **Input stream filtering:** Skips frames where no vehicles are detected or license plates cannot be read. This optimization reduces computational load and ensures that only relevant data is processed, improving overall efficiency.
+
+---
+
 ## Core Features & Task Compliance
-**Fulfillment of requirements:**
+
 - **Real-time tracking:** Assigns a persistent unique-ID to every new vehicle entering the frame using the ByteTrack algorithm.
 - **Dynamic visualization:** Bounding-boxes are drawn using the exact RGB-color identified by the classification-model, accompanied by the recognized license-plate text directly on the frame.
 - **Edge-optimization:** The entire pipeline runs strictly on CPU using ONNX Runtime, avoiding heavy PyTorch dependencies to maximize realtime-performance.
@@ -119,17 +142,24 @@ This method is suitable for local-development and visual-debugging without Docke
     ```
 
 ## Configuration
+
 **Environment variables:**
 - The repository includes a pre-configured `.env` file. It contains no confidential information and provides ready-to-use defaults. You can modify it directly or override variables via inline CLI-commands during the Docker-build.
 - `HEADLESS_MODE`: Disables the graphical user-interface for server-execution (default in Docker).
 - `SAVE_VIDEO`: Enables saving the processed frames to `artifacts/output.mp4` when set to `True`.
 - `RTSP_URL`: Defines the source-path or network-URL for the video-stream.
+- `RTSP_URLS`: Allows specifying multiple RTSP sources in the format `key1=url1;key2=url2`. The `default_rtsp_source` determines which source is used initially.
 - `PROFILE`: Runtime profile for inference (`cpu` or `gpu`). Defaults to `cpu`.
 - `FRAME_SKIP`: Process every N-th frame to reduce CPU load. Defaults to `1` (every frame).
 - `VEHICLE_CONF_THRESHOLD`: Minimum confidence for vehicle detections. Defaults to `0.20`.
 - `PLATE_CONF_THRESHOLD`: Minimum confidence for plate detections. Defaults to `0.30`.
 - `OCR_MIN_VEHICLE_WIDTH`: Minimum vehicle bounding-box width in pixels before OCR is attempted. Defaults to `400`.
 - `OCR_MIN_VEHICLE_AREA`: Minimum vehicle bounding-box area in pixels before OCR is attempted. Defaults to `120000`.
+
+---
+
+## Additional Notes on Artifacts
+- The application automatically generates unique paths for output artifacts (e.g., `output.mp4`, `report.csv`) using an internal mechanism. This ensures that files from previous runs are not overwritten. The paths are created in the `artifacts` directory with an incrementing suffix (e.g., `output_1.mp4`, `report_2.csv`).
 
 ---
 

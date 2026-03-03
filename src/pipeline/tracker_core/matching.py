@@ -59,10 +59,9 @@ def linear_assignment(cost_matrix, thresh):
     matches, unmatched_a, unmatched_b = [], [], []
     result = lap.lapjv(cost_matrix, extend_cost=True, cost_limit=thresh)
     if len(result) == 3:
-        cost, x, y = result
+        _, x, y = result
     elif len(result) == 2:
         x, y = result
-        cost = None
     else:
         raise ValueError("lapjv returned unexpected number of values")
     for ix, mx in enumerate(x):

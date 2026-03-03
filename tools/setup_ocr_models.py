@@ -1,4 +1,3 @@
-
 import sys
 import shutil
 import tarfile
@@ -23,7 +22,13 @@ def find_paddle2onnx():
         except Exception:
             pass
     py_dir = Path(sys.executable).parent
-    for path in [py_dir / "Scripts" / "paddle2onnx.exe", py_dir / "Scripts" / "paddle2onnx", py_dir / "bin" / "paddle2onnx", py_dir / "paddle2onnx.exe", py_dir / "paddle2onnx"]:
+    for path in [
+        py_dir / "Scripts" / "paddle2onnx.exe",
+        py_dir / "Scripts" / "paddle2onnx",
+        py_dir / "bin" / "paddle2onnx",
+        py_dir / "paddle2onnx.exe",
+        py_dir / "paddle2onnx"
+    ]:
         if path.exists():
             return str(path)
     if sys.platform == "win32":
@@ -58,7 +63,15 @@ def untar(src, dst):
 def to_onnx(model_dir, out_file, paddle2onnx):
     for m, p in [("inference.pdmodel", "inference.pdiparams"), ("model.pdmodel", "model.pdiparams")]:
         if (model_dir / m).exists() and (model_dir / p).exists():
-            cmd = [paddle2onnx, "--model_dir", str(model_dir), "--model_filename", m, "--params_filename", p, "--save_file", str(out_file), "--opset_version", "11", "--enable_onnx_checker", "True"]
+            cmd = [
+                paddle2onnx,
+                "--model_dir", str(model_dir),
+                "--model_filename", m,
+                "--params_filename", p,
+                "--save_file", str(out_file),
+                "--opset_version", "11",
+                "--enable_onnx_checker", "True"
+            ]
             out_file.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(cmd, check=True)
             return
