@@ -78,7 +78,7 @@ class Visualizer:
         raw_bgr = _PALETTE.get(color_res.color_name, _PALETTE["unknown"])
         cv2.rectangle(out, (x1, y1), (x2, y2), raw_bgr, self._box_thick)
 
-        lines: list[str] = [color_res.color_name]
+        lines: list[str] = [f"ID:{track.track_id} {color_res.color_name}"]
         if plate_res.plate:
             conf_pct = int(plate_res.confidence * 100)
             lines.append(f"{plate_res.plate}  {conf_pct}%")
