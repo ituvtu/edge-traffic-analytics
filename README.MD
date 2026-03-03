@@ -1,6 +1,6 @@
 # Car Tracking and Analytics Pipeline
 ## Overview
-![alt text](assets/image.png)
+![alt text](assets/image.jpg)
 **Project description:**
 - This repository provides a computer-vision pipeline for real-time vehicle-detection, tracking, color-classification, and license-plate recognition.
 - The application processes video-streams and exports analytical-data into a structured CSV-format alongside a rendered MP4 video-file.
