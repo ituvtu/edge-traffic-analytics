@@ -23,6 +23,20 @@ class CaptureStats:
 
 
 class RTSPCapture:
+    """Unified capture for RTSP streams and local video files.
+
+    A background reader thread continuously decodes frames and overwrites
+    a single-slot buffer (``_latest_frame``).  The consumer always gets
+    the *freshest* frame; anything the consumer cannot process in time is
+    silently dropped — exactly like a real IP camera.
+
+    For **local files** the reader inserts a ``time.sleep(1/fps)`` after
+    every decoded frame so the file is played back at its native frame
+    rate instead of being consumed at disk speed.  This makes a local
+    ``.mp4`` behave identically to a live RTSP camera for downstream
+    processing and recording.
+    """
+
     def __init__(
         self,
         url: str,
@@ -43,19 +57,16 @@ class RTSPCapture:
         self.open_timeout_sec = max(open_timeout_sec, 0.1)
         self.read_timeout_sec = max(read_timeout_sec, 0.1)
         self.stale_frame_timeout_sec = max(stale_frame_timeout_sec, 0.5)
-        # Treat anything that is not a network stream as a local file so that
-        # end-of-file restarts happen instantly (seek to 0) without waiting for
-        # the stale-frame timeout that is designed for dropped RTSP connections.
         self._is_file: bool = not url.lower().startswith(("rtsp://", "rtsps://", "http://", "https://"))
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._latest_frame: np.ndarray | None = None
+        self._latest_frame_pos_ms: float = 0.0
         self._last_frame_ts: float = 0.0
         self._capture: cv2.VideoCapture | None = None
         self.stats = CaptureStats()
         self.source_fps: float = 0.0
-        self._latest_frame_pos_ms: float = 0.0
         self._loop_file = loop_file
         self._eof_reached = False
 
@@ -85,6 +96,13 @@ class RTSPCapture:
             if self._latest_frame is None:
                 return None
             return self._latest_frame.copy()
+
+    def read_with_pos(self) -> tuple[np.ndarray | None, float]:
+        """Return *(frame, position_ms)* atomically under a single lock."""
+        with self._lock:
+            if self._latest_frame is None:
+                return None, 0.0
+            return self._latest_frame.copy(), self._latest_frame_pos_ms
 
     @property
     def frame_pos_ms(self) -> float:
@@ -151,6 +169,7 @@ class RTSPCapture:
                     if reported and reported > 0:
                         self.source_fps = reported
 
+            _frame_t0 = time.monotonic()
             ok, frame = self._capture.read()
             if not ok or frame is None:
                 self.stats.read_failures += 1
@@ -180,12 +199,27 @@ class RTSPCapture:
                     time.sleep(self.loop_sleep_sec)
                 continue
 
+            pos_ms = self._capture.get(cv2.CAP_PROP_POS_MSEC)
+
+            # Unified single-slot: always overwrite with the latest frame.
             with self._lock:
                 self._latest_frame = frame
-                self._latest_frame_pos_ms = self._capture.get(cv2.CAP_PROP_POS_MSEC)
+                self._latest_frame_pos_ms = pos_ms
             self.stats.frames_received += 1
 
-            if self.loop_sleep_sec > 0:
+            if self._is_file:
+                # Compensated sleep: subtract the time already spent on
+                # decoding / locking so each frame period is exactly 1/fps
+                # regardless of how long the decode took.  A flat
+                # ``time.sleep(1/fps)`` would overshoot by the decode
+                # duration, causing slow-motion on machines where the
+                # decode cost is non-trivial (e.g. Windows + large files).
+                fps = self.source_fps if self.source_fps > 0 else 25.0
+                _decode_elapsed = time.monotonic() - _frame_t0
+                _sleep_time = max(0.0, 1.0 / fps - _decode_elapsed)
+                if _sleep_time > 0:
+                    time.sleep(_sleep_time)
+            elif self.loop_sleep_sec > 0:
                 time.sleep(self.loop_sleep_sec)
 
 

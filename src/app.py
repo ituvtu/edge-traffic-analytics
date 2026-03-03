@@ -37,25 +37,21 @@ class _AsyncVideoWriter:
     def __init__(self, path: Path, fourcc: int, fps: float, size: tuple[int, int]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._writer = cv2.VideoWriter(str(path), fourcc, fps, size)
-        self._queue: queue.Queue = queue.Queue(maxsize=16)
+        self._queue: queue.Queue = queue.Queue(maxsize=300)
         self._thread = threading.Thread(target=self._run, daemon=True, name="video-writer")
         self._thread.start()
 
     def write(self, frame: np.ndarray) -> None:
         try:
-            self._queue.put_nowait(frame)
+            self._queue.put(frame, timeout=5.0)
         except queue.Full:
-            pass
+            _log.warning("Video-writer queue full — frame dropped")
 
     def release(self) -> None:
-        # Drain any pending frames so the put(sentinel) never blocks on a full queue.
-        while not self._queue.empty():
-            try:
-                self._queue.get_nowait()
-            except queue.Empty:
-                break
-        self._queue.put(self._SENTINEL)
-        self._thread.join(timeout=15)
+        # Put sentinel after all pending frames so the writer thread flushes
+        # everything to disk before stopping.
+        self._queue.put(self._SENTINEL, timeout=10)
+        self._thread.join(timeout=60)
         self._writer.release()
 
     def _run(self) -> None:
@@ -261,10 +257,12 @@ def run_app(config: AppConfig) -> None:
     stream_start_time: float = 0.0
     written_video_msec: float = 0.0
     frame_duration_msec: float = 0.0
+    _video_pos_offset: float = 0.0
+    frame_pos_ms: float = 0.0
     try:
         while is_running and not keyboard_stop.is_set():
             profiler.start("frame_read")
-            frame = capture.read()
+            frame, frame_pos_ms = capture.read_with_pos()
             profiler.stop("frame_read")
 
             if frame is None and capture.eof_reached:
@@ -282,6 +280,8 @@ def run_app(config: AppConfig) -> None:
                     session_vehicles.clear()
                     plate_seen_counts.clear()
                 track_last_seen.clear()
+                if not is_live_stream:
+                    _video_pos_offset = written_video_msec
                 _last_loops = current_loops
 
             if frame is None:
@@ -299,7 +299,7 @@ def run_app(config: AppConfig) -> None:
                     _open_window()
             if video_writer is None and config.output_video_path is not None:
                 fourcc: int = cv2.VideoWriter.fourcc(*"mp4v")
-                writer_fps = 60.0
+                writer_fps = max(_src_fps, 15.0)
                 video_writer = _AsyncVideoWriter(
                     config.output_video_path, fourcc, fps=writer_fps, size=(w, h)
                 )
@@ -376,7 +376,7 @@ def run_app(config: AppConfig) -> None:
                 plate_results[track.track_id] = plate_result
 
                 if plate_result.plate:
-                    pos_ms = capture.frame_pos_ms
+                    pos_ms = frame_pos_ms
                     if is_live_stream:
                         timestamp_display = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     else:
@@ -444,27 +444,49 @@ def run_app(config: AppConfig) -> None:
                 _ensure_analytics_window(analytics_frame)
 
             if video_writer is not None:
+                # ── Filter: skip frames with no detected vehicles ────────
+                has_detections = len(car_tracks) > 0
+
+                # For live RTSP streams use wall-clock elapsed time.
+                # For local files use the source frame position from the
+                # video container — this makes the output video perfectly
+                # synchronised to the source regardless of how fast or
+                # slow the processing loop runs on a given machine.
                 if is_live_stream:
                     current_msec = (time.time() - stream_start_time) * 1000.0
                 else:
-                    current_msec = capture.frame_pos_ms
-                while written_video_msec <= current_msec:
-                    video_writer.write(visualized)
-                    written_video_msec += frame_duration_msec
+                    current_msec = frame_pos_ms + _video_pos_offset
 
-            # Compensated delay: wait only the time remaining in the current
-            # frame slot so playback matches the source speed on-screen.
-            _elapsed_ms = (time.perf_counter() - t_frame_start) * 1000.0
-            _wait_ms = max(1, int(1000.0 / max(_src_fps, 1.0) - _elapsed_ms))
+                if has_detections:
+                    while written_video_msec <= current_msec:
+                        video_writer.write(visualized)
+                        written_video_msec += frame_duration_msec
+                else:
+                    # No vehicles — advance the cursor so the next frame
+                    # with detections doesn't duplicate over the empty gap.
+                    if written_video_msec < current_msec:
+                        written_video_msec = current_msec
+
+            # Compensated delay: compute _wait_ms AFTER all display prep
+            # so that letterbox / imshow overhead is included in elapsed
+            # time and the waitKey pause is shortened accordingly.
             if not _HEADLESS:
                 _ensure_window()
                 rect = cv2.getWindowImageRect(_WIN)
                 cw, ch = max(1, rect[2]), max(1, rect[3])
                 display = _letterbox(visualized, cw, ch)
                 cv2.imshow(_WIN, display)
+                _elapsed_ms = (time.perf_counter() - t_frame_start) * 1000.0
+                _wait_ms = max(1, int(1000.0 / max(_src_fps, 1.0) - _elapsed_ms))
                 if cv2.waitKey(_wait_ms) & 0xFF == ord("q"):
                     break
-            else:
+            elif is_live_stream:
+                # Only sleep in live-stream mode to maintain real-time pacing
+                # on screen.  For local files in headless mode the reader
+                # thread already throttles to source FPS, so the main loop
+                # naturally stays in sync without an extra sleep.
+                _elapsed_ms = (time.perf_counter() - t_frame_start) * 1000.0
+                _wait_ms = max(1, int(1000.0 / max(_src_fps, 1.0) - _elapsed_ms))
                 time.sleep(_wait_ms / 1000.0)
 
     finally:
